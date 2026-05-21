@@ -26,8 +26,7 @@ RUN apk add --no-cache --update \
         gettext freetype-dev cairo-dev cargo git mariadb-dev openldap-dev
 RUN python3 -m venv $VIRTUAL_ENV && pip install -U 'pip<26' setuptools wheel
 WORKDIR /src
-COPY pyproject.toml setup.py README.rst MANIFEST.in ./
-COPY modoboa/ ./modoboa/
+COPY . /src
 # Modoboa + driver Postgres + driver MySQL (Amavis) + WSGI + statiques + SSO.
 RUN pip install ".[postgresql,mysql]" gunicorn whitenoise mozilla-django-oidc
 

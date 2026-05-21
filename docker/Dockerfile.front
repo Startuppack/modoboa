@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+#
+# Image de PRODUCTION du frontend Modoboa — Nginx servant la SPA Vue et
+# relayant les routes dynamiques vers le backend Django.
+#
+# Build context = racine du dépôt.  ->  docker build -f docker/Dockerfile.front .
+
+# ── 1. Build de la SPA Vue ─────────────────────────────────────────────────
+FROM node:20-alpine AS spa
+WORKDIR /build/frontend
+COPY frontend/ ./
+RUN yarn install --frozen-lockfile --network-timeout 600000 \
+    && yarn build
+# vite `outDir` = ../modoboa/frontend_dist  ->  /build/modoboa/frontend_dist
+
+# ── 2. Image Nginx ─────────────────────────────────────────────────────────
+FROM nginx:1.27-alpine
+# Hôte du backend, substitué dans le template au démarrage.
+ENV BACKEND_HOST=modoboa-api:8000
+COPY --from=spa /build/modoboa/frontend_dist/ /usr/share/nginx/html/
+COPY docker/nginx.conf.template /etc/nginx/templates/default.conf.template
+EXPOSE 8080

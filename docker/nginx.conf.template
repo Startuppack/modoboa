@@ -1,0 +1,45 @@
+# Reverse proxy frontal de l'instance Modoboa — sert la SPA Vue et relaie
+# les routes dynamiques vers le backend Django. `${BACKEND}` est substitué au
+# démarrage (entrypoint nginx) ; défaut : http://modoboa-api:8000.
+
+upstream modoboa_backend {
+    server ${BACKEND_HOST};
+}
+
+server {
+    listen 8080;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    client_max_body_size 50m;
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    # Routes dynamiques servies par le backend Django/Modoboa.
+    location ~ ^/(api|oidc|accounts|reset|media|sitestatic|admin|autoconfig|autodiscover|mobileconfig)(/|$) {
+        proxy_pass http://modoboa_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_redirect off;
+    }
+
+    location = /config.json {
+        proxy_pass http://modoboa_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+
+    location = /robots.txt {
+        proxy_pass http://modoboa_backend;
+        proxy_set_header Host $host;
+    }
+
+    # Tout le reste : la SPA Vue (routage côté client → fallback index.html).
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

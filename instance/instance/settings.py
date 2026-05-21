@@ -381,6 +381,9 @@ if SSO_ENABLED:
     SSO_PROVISION = env_bool("SSO_PROVISION", False)
     SSO_DOMAINADMIN_ROLES = env_list("SSO_DOMAINADMIN_ROLES", "domainadmin")
     SSO_SUPERADMIN_ROLES = env_list("SSO_SUPERADMIN_ROLES", "superadmin")
+    # Attributs Keycloak dédiés (le claim `email` standard = e-mail perso).
+    SSO_EMAIL_CLAIM = env("SSO_EMAIL_CLAIM", "modoboa_email")
+    SSO_ALIASES_CLAIM = env("SSO_ALIASES_CLAIM", "modoboa_aliases")
     SSO_DOMAINS_CLAIM = env("SSO_DOMAINS_CLAIM", "modoboa_domains")
     OIDC_STORE_ID_TOKEN = True
 

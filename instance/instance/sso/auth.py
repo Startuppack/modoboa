@@ -1,17 +1,18 @@
 """
 Backend d'authentification OpenID Connect — fédération vers Keycloak.
 
-Le token pilote l'autorisation Modoboa :
-  • domaine principal    — domaine de l'e-mail (rattachement de la boîte) ;
-  • rôle                 — rôles client `modoboa` du token (domainadmin /
-                           superadmin → DomainAdmins / SuperAdmins ;
-                           sinon SimpleUsers) ;
-  • domaines administrés — attribut multivalué SSO_DOMAINS_CLAIM (cumulés au
-                           domaine principal pour un DomainAdmin).
+Le token pilote l'identité ET l'autorisation Modoboa. Le claim standard
+`email` n'est PAS utilisé pour la boîte (c'est souvent l'e-mail perso) — la
+boîte vient d'attributs Keycloak dédiés :
 
-Avec SSO_PROVISION=true, un compte (et sa boîte) inconnu est créé à la volée
-dans le domaine de son e-mail ; sinon le SSO ne fait que relier un compte
-Modoboa existant. La connexion accepte aussi une adresse alias.
+  • SSO_EMAIL_CLAIM (`modoboa_email`)   — adresse principale de la boîte ;
+  • SSO_ALIASES_CLAIM (`modoboa_aliases`) — adresses alias (multivalué) ;
+  • rôles client `modoboa`              — domainadmin/superadmin → rôle Modoboa ;
+  • SSO_DOMAINS_CLAIM (`modoboa_domains`) — domaines administrés (DomainAdmin).
+
+Le claim `email` standard, s'il existe, est conservé comme e-mail secondaire
+(récupération de mot de passe). Avec SSO_PROVISION=true, le compte, sa boîte
+et ses alias sont créés à la première connexion.
 """
 import logging
 
@@ -29,6 +30,27 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
 
     # ── Lecture du token ───────────────────────────────────────────────────
     @staticmethod
+    def _mailbox_address(claims) -> str:
+        """Adresse principale de la boîte (attribut dédié, jamais `email`)."""
+        return (claims.get(settings.SSO_EMAIL_CLAIM) or "").strip().lower()
+
+    @staticmethod
+    def _claim_list(claims, key) -> list:
+        """Lit un claim multivalué (liste JSON ou chaîne séparée)."""
+        raw = claims.get(key)
+        if isinstance(raw, str):
+            raw = raw.replace(",", " ").split()
+        if not isinstance(raw, (list, tuple)):
+            return []
+        return [str(v).strip().lower() for v in raw if str(v).strip()]
+
+    def _aliases(self, claims) -> list:
+        return self._claim_list(claims, settings.SSO_ALIASES_CLAIM)
+
+    def _managed_domains(self, claims) -> list:
+        return self._claim_list(claims, settings.SSO_DOMAINS_CLAIM)
+
+    @staticmethod
     def _token_roles(claims) -> set:
         """Tous les rôles présents dans le token (realm + clients + `roles`)."""
         roles = set((claims.get("realm_access") or {}).get("roles") or [])
@@ -40,16 +62,6 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
         elif isinstance(extra, list):
             roles.update(extra)
         return {str(r).lower() for r in roles}
-
-    @staticmethod
-    def _managed_domains(claims) -> list:
-        """Domaines administrés déclarés dans l'attribut SSO_DOMAINS_CLAIM."""
-        raw = claims.get(settings.SSO_DOMAINS_CLAIM)
-        if isinstance(raw, str):
-            raw = raw.replace(",", " ").split()
-        if not isinstance(raw, (list, tuple)):
-            return []
-        return [str(d).strip().lower() for d in raw if str(d).strip()]
 
     def _resolve_role(self, claims) -> str:
         roles = self._token_roles(claims)
@@ -64,6 +76,8 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
     def _get_domain(name, create):
         from modoboa.admin.models import Domain
 
+        if not name:
+            return None
         domain = Domain.objects.filter(name__iexact=name).first()
         if domain or not create:
             return domain
@@ -74,23 +88,29 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
 
     # ── Hooks mozilla-django-oidc ──────────────────────────────────────────
     def verify_claims(self, claims):
-        """Un e-mail est indispensable pour rattacher / créer le compte."""
-        return bool(claims.get("email"))
+        """L'adresse de boîte dédiée est indispensable au rattachement."""
+        if not self._mailbox_address(claims):
+            logger.warning("SSO : token sans attribut %s — refusé",
+                            settings.SSO_EMAIL_CLAIM)
+            return False
+        return True
 
     def filter_users_by_claims(self, claims):
-        """Retrouve le compte par e-mail, identifiant, ou adresse alias."""
-        email = (claims.get("email") or "").strip().lower()
-        if not email:
+        """Retrouve le compte par son adresse de boîte, ou une de ses alias."""
+        address = self._mailbox_address(claims)
+        if not address:
             return self.UserModel.objects.none()
-        qs = self.UserModel.objects.filter(email__iexact=email) | \
-            self.UserModel.objects.filter(username__iexact=email)
+        qs = self.UserModel.objects.filter(username__iexact=address) | \
+            self.UserModel.objects.filter(email__iexact=address)
         if qs.exists():
             return qs
-        # L'e-mail est peut-être une adresse alias → on remonte à la boîte.
+        # L'adresse correspond peut-être à un alias → on remonte à la boîte.
         from modoboa.admin.models import Alias
 
-        alias = Alias.objects.filter(address__iexact=email, internal=False).first()
-        if alias:
+        for addr in [address] + self._aliases(claims):
+            alias = Alias.objects.filter(address__iexact=addr, internal=False).first()
+            if not alias:
+                continue
             ar = (alias.aliasrecipient_set.filter(r_mailbox__isnull=False)
                   .select_related("r_mailbox").first())
             if ar and ar.r_mailbox and ar.r_mailbox.user_id:
@@ -98,57 +118,104 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
         return self.UserModel.objects.none()
 
     def create_user(self, claims):
-        """Crée le compte + sa boîte dans le domaine de l'e-mail (SSO_PROVISION)."""
+        """Crée le compte + sa boîte + ses alias (SSO_PROVISION)."""
         from modoboa.admin.models import Mailbox
 
-        email = (claims.get("email") or "").strip().lower()
-        local, _, dname = email.partition("@")
+        address = self._mailbox_address(claims)
+        local, _, dname = address.partition("@")
         if not local or not dname:
-            raise SuspiciousOperation(f"E-mail SSO invalide : {email!r}")
+            raise SuspiciousOperation(f"Adresse de boîte SSO invalide : {address!r}")
         with transaction.atomic():
             domain = self._get_domain(dname, create=settings.SSO_PROVISION)
             if not domain:
                 raise SuspiciousOperation(
                     f"Domaine {dname} inconnu de Modoboa — connexion SSO refusée."
                 )
-            user = self.UserModel(username=email, email=email)
+            user = self.UserModel(username=address, email=address)
             user.set_unusable_password()
-            self._apply_names(user, claims)
+            self._apply_profile(user, claims)
             user.save()
             mailbox = Mailbox(address=local, domain=domain, user=user)
             mailbox.set_quota(override_rules=True)
             mailbox.save()
+            self._sync_aliases(user, mailbox, claims)
             self._sync_authz(user, claims, domain)
-        logger.info("SSO : compte + boîte créés pour %s (domaine %s)", email, dname)
+        logger.info("SSO : compte + boîte créés — %s (domaine %s)", address, dname)
         return user
 
     def update_user(self, user, claims):
-        """Resynchronise nom, rôle et domaines administrés à chaque connexion."""
+        """Resynchronise profil, alias, rôle et domaines à chaque connexion."""
         if not user.is_active:
             raise SuspiciousOperation(
-                f"Compte Modoboa désactivé pour {user.email} — connexion refusée."
+                f"Compte Modoboa désactivé pour {user.username} — connexion refusée."
             )
-        changed = self._apply_names(user, claims)
-        mailbox = getattr(user, "mailbox", None)
-        primary = mailbox.domain if mailbox else self._get_domain(
-            (user.email or "").partition("@")[2], create=False
-        )
-        self._sync_authz(user, claims, primary)
-        if changed:
-            user.save(update_fields=["first_name", "last_name"])
-        logger.info("SSO : connexion de %s (rôle %s)", user.email, user.role)
+        with transaction.atomic():
+            changed = self._apply_profile(user, claims)
+            if changed:
+                user.save()
+            mailbox = getattr(user, "mailbox", None)
+            primary = mailbox.domain if mailbox else self._get_domain(
+                self._mailbox_address(claims).partition("@")[2], create=False
+            )
+            if mailbox:
+                self._sync_aliases(user, mailbox, claims)
+            self._sync_authz(user, claims, primary)
+        logger.info("SSO : connexion de %s (rôle %s)", user.username, user.role)
         return user
 
-    # ── Autorisation ───────────────────────────────────────────────────────
+    # ── Profil / alias / autorisation ──────────────────────────────────────
+    @staticmethod
+    def _apply_profile(user, claims):
+        """Synchronise nom/prénom + e-mail secondaire (= e-mail perso du token)."""
+        changed = False
+        for field, value in (("first_name", claims.get("given_name")),
+                              ("last_name", claims.get("family_name"))):
+            value = value or ""
+            if value and getattr(user, field) != value:
+                setattr(user, field, value)
+                changed = True
+        # Le claim `email` standard = e-mail perso → e-mail secondaire Modoboa.
+        personal = (claims.get("email") or "").strip().lower()
+        if personal and hasattr(user, "secondary_email") and \
+                user.secondary_email != personal:
+            user.secondary_email = personal
+            changed = True
+        return changed
+
+    def _sync_aliases(self, user, mailbox, claims):
+        """Crée/relie les adresses alias de la boîte (additif, non destructif)."""
+        from modoboa.admin.models import Alias
+
+        recipient = f"{mailbox.address}@{mailbox.domain.name}"
+        for addr in self._aliases(claims):
+            if addr == recipient:
+                continue
+            alocal, _, adomain = addr.partition("@")
+            if not alocal or not adomain:
+                continue
+            domain = self._get_domain(adomain, create=settings.SSO_PROVISION)
+            if not domain:
+                logger.warning("SSO : domaine d'alias %s introuvable", adomain)
+                continue
+            try:
+                alias = Alias.objects.filter(address__iexact=addr).first()
+                if not alias:
+                    alias = Alias(address=addr, domain=domain, enabled=True,
+                                  internal=False)
+                    alias.save()
+                alias.set_recipients([recipient])
+                logger.info("SSO : alias %s → %s", addr, recipient)
+            except Exception as exc:  # non bloquant
+                logger.warning("SSO : alias %s échoué : %s", addr, exc)
+
     def _sync_authz(self, user, claims, primary_domain):
         """Applique rôle Modoboa + rattachement aux domaines administrés."""
         role = self._resolve_role(claims)
         if user.role != role:
             user.role = role
-            logger.info("SSO : %s → rôle %s", user.email, role)
+            logger.info("SSO : %s → rôle %s", user.username, role)
         if role != "DomainAdmins":
             return
-        # DomainAdmin : domaine principal + domaines de l'attribut token.
         names = set(self._managed_domains(claims))
         if primary_domain:
             names.add(primary_domain.name.lower())
@@ -160,17 +227,6 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
             if user not in domain.admins:
                 try:
                     domain.add_admin(user)
-                    logger.info("SSO : %s administrateur de %s", user.email, name)
+                    logger.info("SSO : %s administrateur de %s", user.username, name)
                 except Exception as exc:  # limites, etc. — non bloquant
                     logger.warning("SSO : add_admin(%s) échoué : %s", name, exc)
-
-    @staticmethod
-    def _apply_names(user, claims):
-        first = claims.get("given_name") or ""
-        last = claims.get("family_name") or ""
-        changed = False
-        if first and user.first_name != first:
-            user.first_name, changed = first, True
-        if last and user.last_name != last:
-            user.last_name, changed = last, True
-        return changed

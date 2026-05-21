@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+#
+# Image de PRODUCTION du MTA Postfix de l'instance Modoboa Startup Pack.
+# Postfix + pilote PostgreSQL (maps SQL Modoboa). La configuration est fournie
+# au runtime via ConfigMap/Secret (rendue par un initContainer k8s).
+FROM alpine:3.20
+
+RUN apk add --no-cache postfix postfix-pgsql ca-certificates tini \
+    && rm -rf /var/cache/apk/*
+
+COPY docker/postfix-entrypoint.sh /usr/local/bin/postfix-entrypoint.sh
+RUN chmod +x /usr/local/bin/postfix-entrypoint.sh
+
+EXPOSE 25 587
+ENTRYPOINT ["tini", "--", "/usr/local/bin/postfix-entrypoint.sh"]

@@ -48,6 +48,9 @@ jobs:
           - component: frontend
             image: modoboa-frontend
             dockerfile: docker/Dockerfile.front
+          - component: postfix
+            image: modoboa-postfix
+            dockerfile: docker/Dockerfile.postfix
 
     steps:
       - name: Checkout

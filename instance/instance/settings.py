@@ -373,9 +373,15 @@ if SSO_ENABLED:
     OIDC_AUTHENTICATE_CLASS = "instance.sso.views.IdpHintAuthRequestView"
     OIDC_OP_LOGOUT_URL_METHOD = "instance.sso.views.keycloak_logout_url"
 
-    # Les comptes mail sont provisionnés par Modoboa/onboarding : on relie par
-    # e-mail, on ne crée pas d'utilisateur inconnu sauf SSO_CREATE_USER=true.
-    OIDC_CREATE_USER = env_bool("SSO_CREATE_USER", False)
+    # Provisionnement piloté par le token (cf. instance/sso/auth.py) :
+    #  • domaine principal      = domaine de l'e-mail ;
+    #  • rôle                   = rôles client `modoboa` dans le token ;
+    #  • domaines administrés   = attribut multivalué SSO_DOMAINS_CLAIM.
+    OIDC_CREATE_USER = env_bool("SSO_PROVISION", False)
+    SSO_PROVISION = env_bool("SSO_PROVISION", False)
+    SSO_DOMAINADMIN_ROLES = env_list("SSO_DOMAINADMIN_ROLES", "domainadmin")
+    SSO_SUPERADMIN_ROLES = env_list("SSO_SUPERADMIN_ROLES", "superadmin")
+    SSO_DOMAINS_CLAIM = env("SSO_DOMAINS_CLAIM", "modoboa_domains")
     OIDC_STORE_ID_TOKEN = True
 
     LOGIN_URL = "/oidc/authenticate/"

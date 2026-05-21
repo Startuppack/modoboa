@@ -88,8 +88,13 @@ MODOBOA_APPS = (
     "modoboa.contacts",
     "modoboa.calendars",
     "modoboa.webmail",
-    "modoboa.amavis",
 )
+
+# Amavis (antispam) — activé seulement si une base Amavis est fournie ; sinon
+# l'app n'est pas chargée (ses hooks interrogeraient des tables inexistantes).
+AMAVIS_ENABLED = bool(env("AMAVIS_DB_HOST"))
+if AMAVIS_ENABLED:
+    MODOBOA_APPS += ("modoboa.amavis",)
 
 try:
     import ldap  # noqa: F401
@@ -308,9 +313,10 @@ LDAP_SERVER_PORT = env("LDAP_SERVER_PORT", 3389)
 WEBMAIL_DEV_MODE = False
 
 # AMAVIS --------------------------------------------------------------------
-DATABASE_ROUTERS = ["modoboa.amavis.dbrouter.AmavisRouter"]
-AMAVIS_DEFAULT_DATABASE_ENCODING = "UTF-8"
-if env("AMAVIS_DB_HOST"):
+# Routeur + base dédiée seulement si Amavis est déployé (cf. AMAVIS_ENABLED).
+if AMAVIS_ENABLED:
+    DATABASE_ROUTERS = ["modoboa.amavis.dbrouter.AmavisRouter"]
+    AMAVIS_DEFAULT_DATABASE_ENCODING = "UTF-8"
     DATABASES["amavis"] = {
         "ENGINE": "django.db.backends.mysql",
         "HOST": env("AMAVIS_DB_HOST"),
@@ -319,8 +325,6 @@ if env("AMAVIS_DB_HOST"):
         "USER": env("AMAVIS_DB_USER", "amavis"),
         "PASSWORD": env("AMAVIS_DB_PASSWORD", ""),
     }
-else:  # pas d'Amavis configuré → l'app reste installée mais sans base dédiée.
-    DATABASES["amavis"] = dict(DATABASES["default"])
 
 # LOGGING (tout sur stdout — collecté par k8s) ------------------------------
 LOGGING = {

@@ -5,14 +5,15 @@ Le token pilote l'identité ET l'autorisation Modoboa. Le claim standard
 `email` n'est PAS utilisé pour la boîte (c'est souvent l'e-mail perso) — la
 boîte vient d'attributs Keycloak dédiés :
 
-  • SSO_EMAIL_CLAIM (`modoboa_email`)   — adresse principale de la boîte ;
+  • SSO_EMAIL_CLAIM (`modoboa_email`)     — adresse principale de la boîte ;
   • SSO_ALIASES_CLAIM (`modoboa_aliases`) — adresses alias (multivalué) ;
-  • rôles client `modoboa`              — domainadmin/superadmin → rôle Modoboa ;
+  • rôles client `modoboa`                — domainadmin/superadmin → rôle ;
   • SSO_DOMAINS_CLAIM (`modoboa_domains`) — domaines administrés (DomainAdmin).
 
 Le claim `email` standard, s'il existe, est conservé comme e-mail secondaire
 (récupération de mot de passe). Avec SSO_PROVISION=true, le compte, sa boîte
-et ses alias sont créés à la première connexion.
+et ses alias sont créés à la première connexion — au nom du SuperAdmin
+(propriété des objets requise par l'app `limits`).
 """
 import logging
 
@@ -72,8 +73,13 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
         return "SimpleUsers"
 
     # ── Modèles Modoboa ────────────────────────────────────────────────────
+    def _superadmin(self):
+        """SuperAdmin propriétaire des objets provisionnés (compte `admin`)."""
+        return (self.UserModel.objects.filter(is_superuser=True)
+                .order_by("pk").first())
+
     @staticmethod
-    def _get_domain(name, create):
+    def _get_domain(name, create, creator=None):
         from modoboa.admin.models import Domain
 
         if not name:
@@ -82,7 +88,7 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
         if domain or not create:
             return domain
         domain = Domain(name=name.lower(), enabled=True, type="domain")
-        domain.save()
+        domain.save(creator=creator)
         logger.info("SSO : domaine Modoboa créé — %s", name)
         return domain
 
@@ -120,13 +126,16 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
     def create_user(self, claims):
         """Crée le compte + sa boîte + ses alias (SSO_PROVISION)."""
         from modoboa.admin.models import Mailbox
+        from modoboa.lib.permissions import grant_access_to_object
 
         address = self._mailbox_address(claims)
         local, _, dname = address.partition("@")
         if not local or not dname:
             raise SuspiciousOperation(f"Adresse de boîte SSO invalide : {address!r}")
+        creator = self._superadmin()
         with transaction.atomic():
-            domain = self._get_domain(dname, create=settings.SSO_PROVISION)
+            domain = self._get_domain(dname, create=settings.SSO_PROVISION,
+                                      creator=creator)
             if not domain:
                 raise SuspiciousOperation(
                     f"Domaine {dname} inconnu de Modoboa — connexion SSO refusée."
@@ -135,11 +144,13 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
             user.set_unusable_password()
             self._apply_profile(user, claims)
             user.save()
+            if creator:
+                grant_access_to_object(creator, user, is_owner=True)
             mailbox = Mailbox(address=local, domain=domain, user=user)
             mailbox.set_quota(override_rules=True)
-            mailbox.save()
-            self._sync_aliases(user, mailbox, claims)
-            self._sync_authz(user, claims, domain)
+            mailbox.save(creator=creator)
+            self._sync_aliases(user, mailbox, claims, creator)
+            self._sync_authz(user, claims, domain, creator)
         logger.info("SSO : compte + boîte créés — %s (domaine %s)", address, dname)
         return user
 
@@ -149,6 +160,7 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
             raise SuspiciousOperation(
                 f"Compte Modoboa désactivé pour {user.username} — connexion refusée."
             )
+        creator = self._superadmin()
         with transaction.atomic():
             changed = self._apply_profile(user, claims)
             if changed:
@@ -158,8 +170,8 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
                 self._mailbox_address(claims).partition("@")[2], create=False
             )
             if mailbox:
-                self._sync_aliases(user, mailbox, claims)
-            self._sync_authz(user, claims, primary)
+                self._sync_aliases(user, mailbox, claims, creator)
+            self._sync_authz(user, claims, primary, creator)
         logger.info("SSO : connexion de %s (rôle %s)", user.username, user.role)
         return user
 
@@ -182,7 +194,7 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
             changed = True
         return changed
 
-    def _sync_aliases(self, user, mailbox, claims):
+    def _sync_aliases(self, user, mailbox, claims, creator):
         """Crée/relie les adresses alias de la boîte (additif, non destructif)."""
         from modoboa.admin.models import Alias
 
@@ -193,7 +205,8 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
             alocal, _, adomain = addr.partition("@")
             if not alocal or not adomain:
                 continue
-            domain = self._get_domain(adomain, create=settings.SSO_PROVISION)
+            domain = self._get_domain(adomain, create=settings.SSO_PROVISION,
+                                      creator=creator)
             if not domain:
                 logger.warning("SSO : domaine d'alias %s introuvable", adomain)
                 continue
@@ -202,13 +215,13 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
                 if not alias:
                     alias = Alias(address=addr, domain=domain, enabled=True,
                                   internal=False)
-                    alias.save()
+                    alias.save(creator=creator)
                 alias.set_recipients([recipient])
                 logger.info("SSO : alias %s → %s", addr, recipient)
             except Exception as exc:  # non bloquant
                 logger.warning("SSO : alias %s échoué : %s", addr, exc)
 
-    def _sync_authz(self, user, claims, primary_domain):
+    def _sync_authz(self, user, claims, primary_domain, creator):
         """Applique rôle Modoboa + rattachement aux domaines administrés."""
         role = self._resolve_role(claims)
         if user.role != role:
@@ -220,7 +233,8 @@ class KeycloakOIDCBackend(OIDCAuthenticationBackend):
         if primary_domain:
             names.add(primary_domain.name.lower())
         for name in names:
-            domain = self._get_domain(name, create=settings.SSO_PROVISION)
+            domain = self._get_domain(name, create=settings.SSO_PROVISION,
+                                      creator=creator)
             if not domain:
                 logger.warning("SSO : domaine administré %s introuvable", name)
                 continue

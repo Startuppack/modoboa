@@ -80,6 +80,22 @@ def federated_logout(request):
     endpoint = getattr(settings, "OIDC_OP_LOGOUT_ENDPOINT", "")
     final = _safe_post_logout(request)
     id_token = request.session.get("oidc_id_token")
+    # SINGLE-LOGOUT : révoque TOUS les tokens OAuth Modoboa de l'utilisateur
+    # (Django OAuth Toolkit) — la SPA mail.startuppack.eu ET le webmail Roundcube
+    # s'authentifient via /api/o/ et reçoivent des access tokens de longue durée
+    # (~10h). Tuer la session Keycloak/Django ne les invalide PAS → la SPA reste
+    # affichée connectée. En supprimant ses access+refresh tokens, le prochain
+    # appel API de la SPA renvoie 401, son refresh échoue → la SPA se déconnecte.
+    user = getattr(request, "user", None)
+    if user is not None and user.is_authenticated:
+        try:
+            from oauth2_provider.models import (
+                get_access_token_model, get_refresh_token_model,
+            )
+            get_refresh_token_model().objects.filter(user=user).delete()
+            get_access_token_model().objects.filter(user=user).delete()
+        except Exception:
+            logger.exception("federated_logout : révocation tokens OAuth Modoboa")
     auth_logout(request)
     if not endpoint:
         return HttpResponseRedirect(final)

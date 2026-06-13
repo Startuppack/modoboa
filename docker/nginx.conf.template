@@ -18,7 +18,7 @@ server {
     gzip_types text/css application/javascript application/json image/svg+xml;
 
     # Routes dynamiques servies par le backend Django/Modoboa.
-    location ~ ^/(api|oidc|accounts|reset|media|sitestatic|admin|autoconfig|autodiscover|mobileconfig)(/|$) {
+    location ~ ^/(api|oidc|sso|accounts|reset|media|sitestatic|admin|autoconfig|autodiscover|mobileconfig)(/|$) {
         proxy_pass http://modoboa_backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

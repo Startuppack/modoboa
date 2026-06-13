@@ -10,6 +10,12 @@ urlpatterns = [
 
 # SSO Keycloak — monté avant les routes Modoboa pour intercepter /oidc/.
 if settings.SSO_ENABLED:
-    urlpatterns += [path("oidc/", include("mozilla_django_oidc.urls"))]
+    from .sso.views import federated_logout
+
+    urlpatterns += [
+        path("oidc/", include("mozilla_django_oidc.urls")),
+        # Logout fédéré GET-able (Roundcube → Modoboa → Keycloak), cf. sso/views.
+        path("sso/logout/", federated_logout, name="federated-logout"),
+    ]
 
 urlpatterns += [path("", include("modoboa.urls"))]

@@ -35,6 +35,28 @@ export const useAuthStore = defineStore('auth', () => {
     filterProtocolClaims: true,
     loadUserInfo: true,
   })
+
+  // Single-logout : `monitorSession` surveille la session Keycloak via le
+  // check_session_iframe. Quand elle disparaît — typiquement une déconnexion
+  // depuis un AUTRE client de la même session SSO (ex. le webmail Roundcube via
+  // /sso/logout/) — oidc-client-ts émet `userSignedOut`. Sans ce handler, la SPA
+  // gardait son access token en cache et restait affichée connectée (page
+  // /user/webmail « fantôme »). On purge l'utilisateur local et on renvoie vers
+  // Keycloak : la session étant morte, l'utilisateur retombe sur le login.
+  manager.events.addUserSignedOut(async () => {
+    try {
+      await manager.removeUser()
+    } catch (e) {
+      /* best-effort */
+    }
+    authUser.value = null
+    isAuthenticated.value = false
+    delete repository.defaults.headers.common.Authorization
+    manager.signinRedirect().catch(() => {
+      window.location.href = getAbsoluteUrl(config.OAUTH_POST_REDIRECT_URI)
+    })
+  })
+
   const fidoCreds = ref([])
 
   const userHasMailbox = computed(() => {

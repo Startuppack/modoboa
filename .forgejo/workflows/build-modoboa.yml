@@ -1,0 +1,50 @@
+# Build CI migré vers Forgejo Actions (org intern) + PODMAN — remplace GitHub
+# Actions (billing bloqué). DOCKER_BUILDKIT=0 force le builder classique (API
+# /build implémentée par podman ; buildkit/buildx n'est pas supporté par podman).
+#
+# Images/tags STRICTEMENT identiques à l'ancien GitHub Actions
+# (.github/workflows/build-images.yml) : 3 images (backend/frontend/postfix),
+# branche master, mêmes path-filters.
+name: build-modoboa
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'modoboa/**'
+      - 'frontend/**'
+      - 'instance/**'
+      - 'docker/**'
+      - 'pyproject.toml'
+      - '.forgejo/workflows/build-modoboa.yml'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: podman
+    env:
+      DOCKER_BUILDKIT: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + push backend/frontend/postfix (podman, builder classique)
+        run: |
+          set -e
+          REG="${{ secrets.HARBOR_REGISTRY }}"
+          SHORT="${GITHUB_SHA::7}"
+          BRANCH="${GITHUB_REF_NAME//\//-}"
+          PUSH_TAGS="$SHORT $BRANCH"
+          if [ "$GITHUB_REF_NAME" = "master" ]; then PUSH_TAGS="$PUSH_TAGS latest"; fi
+          echo "${{ secrets.HARBOR_PASSWORD }}" | docker login "$REG" -u "${{ secrets.HARBOR_USER }}" --password-stdin
+
+          build_one() {
+            local image="$1" dockerfile="$2"
+            local img="$REG/startuppack/$image"
+            local build_tags=""
+            for t in $PUSH_TAGS; do build_tags="$build_tags -t $img:$t"; done
+            echo "=== build $img (Dockerfile=$dockerfile) ==="
+            DOCKER_BUILDKIT=0 docker build -f "$dockerfile" $build_tags .
+            for t in $PUSH_TAGS; do docker push "$img:$t"; done
+          }
+
+          build_one modoboa          docker/Dockerfile
+          build_one modoboa-frontend docker/Dockerfile.front
+          build_one modoboa-postfix  docker/Dockerfile.postfix
+          echo "OK: pushed modoboa / modoboa-frontend / modoboa-postfix ($PUSH_TAGS) (moteur podman)"
